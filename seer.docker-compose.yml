@@ -1,0 +1,65 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  attendee-init:
+    build: .
+    env_file: .env
+    restart: "no"
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      bash -lc "
+      python manage.py migrate &&
+      python manage.py collectstatic --noinput &&
+      python manage.py shell -c \"from django.contrib.auth import get_user_model; import os; U=get_user_model(); email=os.environ['DJANGO_SUPERUSER_EMAIL']; password=os.environ['DJANGO_SUPERUSER_PASSWORD']; U.objects.filter(email=email).exists() or U.objects.create_superuser(username=email, email=email, password=password)\"
+      "
+
+  attendee-web:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      attendee-init:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    command: gunicorn attendee.wsgi --bind 0.0.0.0:8000
+
+  attendee-worker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      attendee-init:
+        condition: service_completed_successfully
+    shm_size: "1gb"
+    command: celery -A attendee worker -l info --concurrency=1
+
+  attendee-scheduler:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      attendee-init:
+        condition: service_completed_successfully
+    command: python manage.py run_scheduler
+
+volumes:
+  redis_data:
